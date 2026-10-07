@@ -32,9 +32,14 @@ def call(method: str, path: str, body: dict | None = None) -> tuple[int, object]
         return e.code, e.read().decode()[:300]
 
 
-def show(label: str, method: str, path: str, body: dict | None = None):
+FAILURES: list[str] = []
+
+
+def show(label: str, method: str, path: str, body: dict | None = None, expect: int = 200):
     code, out = call(method, path, body)
     print(f'{label:<34} {code}  {json.dumps(out)[:200]}')
+    if code != expect:
+        FAILURES.append(f'{label}: got {code}, expected {expect}')
     return out
 
 
@@ -57,7 +62,7 @@ show('update (check in, 4 people)', 'POST', '/bookings/update',
 show('manifest (POST)', 'POST', '/manifest', {'sailing_id': 'S1001'})
 show('manifest (GET)', 'GET', '/manifest-get?sailing_id=S1001')
 show('booking by lead', 'GET', '/booking/by-lead?lead_name=' + urllib.parse.quote('Ada Lovelace'))
-show('booking by lead (missing -> 404)', 'GET', '/booking/by-lead?lead_name=Nobody')
+show('booking by lead (missing -> 404)', 'GET', '/booking/by-lead?lead_name=Nobody', expect=404)
 show('sailings on a route', 'GET', '/sailings?route=' + urllib.parse.quote('Seattle-Bainbridge'))
 
 # 5. Concurrency: 12 parallel clients booking the same sailing
@@ -70,7 +75,14 @@ def book(i: int):
 with cf.ThreadPoolExecutor(max_workers=12) as pool:
     codes = [code for code, _ in pool.map(book, range(12))]
 print(f'{"12 parallel bookings":<34} status codes: {sorted(set(codes))}')
+if set(codes) != {200}:
+    FAILURES.append(f'parallel bookings: status codes {sorted(set(codes))}')
 show('manifest S1005', 'POST', '/manifest', {'sailing_id': 'S1005'})
 
 # 6. Cancel (delete route, by primary key)
 show('cancel', 'POST', '/bookings/cancel', {'booking_id': booking_id})
+
+if FAILURES:
+    print('\nFAILED:', *FAILURES, sep='\n  ')
+    sys.exit(1)
+print('\nall routes OK')

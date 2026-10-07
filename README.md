@@ -19,16 +19,20 @@ A small, complete ferry booking backend in one Python file. Two tables (`sailing
 - **Reads and writes**: Json columns, primary-key updates and deletes, and quick inspection with the `pxt` CLI (`pxt rows`, `pxt get`, `pxt count`)
 - **Incremental computed columns** powered by plain Python UDFs (`@pxt.udf`)
 - **B-tree indexes** declared on the model (`__indexes__`) back the lookup queries
+- **Importable UDF module**: UDFs in `udfs.py`, tables in `models.py`, queries in `queries.py`, routes in `app.py` (Pixeltable resolves UDFs by module path)
 - **`pixeltable.toml`** declares a local database and a **Pixeltable Cloud** database, so the same code deploys with `pxt db update`
 
 ## What's inside
 
 | File | What it is |
 |------|------------|
-| `app.py` | The whole backend: tables, UDFs, computed columns, queries and the FastAPI router |
+| `app.py` | The API: one `FastAPIRouter` wiring the tables and queries into REST routes |
 | `client_demo.py` | Call every route of the ferry booking API, then book 12 seats in parallel |
+| `models.py` | Tables declared as Python classes: columns, computed columns, indexes |
 | `pixeltable.toml` | Project config: the local database plus a Pixeltable Cloud database (sizing, deploy excludes) |
+| `queries.py` | `@pxt.query` functions served as query routes |
 | `seed.py` | Seed a few ferry sailings so the /sailings and /manifest routes have data to show |
+| `udfs.py` | Pixeltable UDFs (`@pxt.udf`) in their own importable module |
 | `requirements.txt` / `pyproject.toml` | Dependencies (`pixeltable[serve]>=0.7.14`) |
 
 **Tables**
@@ -95,9 +99,10 @@ Hosted routes require an API key: send it in the `X-api-key` header (for example
 
 ## Code walkthrough
 
-**1. Business logic is plain Python.** A `@pxt.udf` function is registered with Pixeltable and can be used as a column expression:
+**1. Business logic is plain Python, in `udfs.py`.** A `@pxt.udf` function can be used as a column expression. Pixeltable records UDFs by module path (`udfs.fare_cents`), so they live in their own importable module rather than inline in the app: the daemon, serving workers and Pixeltable Cloud import it again by that path.
 
 ```python
+# udfs.py
 @pxt.udf
 def fare_cents(party_size: int, vehicle_len_m: float | None, extras: dict | None) -> int:
     """Fare: per-person base + vehicle length + priced extras (bikes, pets, cabin)."""
@@ -114,9 +119,10 @@ def fare_cents(party_size: int, vehicle_len_m: float | None, extras: dict | None
     return total
 ```
 
-**2. Tables are Python classes.** Annotated attributes are stored columns; attributes assigned an expression are **computed columns** (`booking_id`, `fare`, `deck_class`, `extras_order`), evaluated incrementally on every insert or update and recomputed when their inputs change. Indexes live next to the columns:
+**2. Tables are Python classes (`models.py`).** Annotated attributes are stored columns; attributes assigned an expression are **computed columns** (`booking_id`, `fare`, `deck_class`, `extras_order`), evaluated incrementally on every insert or update and recomputed when their inputs change. Indexes live next to the columns:
 
 ```python
+# models.py
 class Bookings(TableModel, name='bookings', has_default_idxs=False):
     booking_id = pxt.Column(value=pxtf.uuid.uuid7(), primary_key=True)
     sailing_id: pxt.String
@@ -126,6 +132,7 @@ class Bookings(TableModel, name='bookings', has_default_idxs=False):
     extras: pxt.Json | None
     status: pxt.String
 
+    # computed columns: evaluated on insert/update, recomputed when inputs change
     fare = fare_cents(party_size, vehicle_len_m, extras)
     deck_class = deck(vehicle_len_m)
     extras_order = extras_keys(extras)
@@ -133,9 +140,10 @@ class Bookings(TableModel, name='bookings', has_default_idxs=False):
     __indexes__ = [pxt.BtreeIndex(sailing_id), pxt.BtreeIndex(status)]
 ```
 
-**3. Queries are functions.** `@pxt.query` wraps a Pixeltable query so it can be called from Python or exposed as a route:
+**3. Queries are functions (`queries.py`).** `@pxt.query` wraps a Pixeltable query so it can be called from Python or exposed as a route:
 
 ```python
+# queries.py
 @pxt.query
 def manifest(sailing_id: str):
     """All bookings on a sailing (index-backed)."""
@@ -150,6 +158,7 @@ def manifest(sailing_id: str):
 **4. One router, a full REST API.** `FastAPIRouter` generates request/response models from the column types, validates input, and publishes OpenAPI docs at `/docs`:
 
 ```python
+# app.py
 booking_api = FastAPIRouter(name='booking_api')
 booking_api.add_insert_route(
     Bookings,
